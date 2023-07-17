@@ -34,12 +34,19 @@ extras_require = {
         "automl_sphinx_theme",
         endrequires::docs>>
         # Others
+<<<<<<< Updated upstream:_templates/setup.py
         <<requires::mypy "mypy", endrequires::mypy>>
         <<requires::isort "isort", endrequires::isort>>
         <<requires::black "black", endrequires::black>>
         <<requires::pydocstyle "pydocstyle", endrequires::pydocstyle>>
         <<requires::flake8 "flake8", endrequires::flake8>>
         <<requires::pre-commit "pre-commit", endrequires::pre-commit>>
+=======
+        "isort",
+        "black",
+        "pydocstyle",
+        "flake8",
+>>>>>>> Stashed changes:setup.py
     ]
 }
 
@@ -57,7 +64,17 @@ setuptools.setup(
     packages=setuptools.find_packages(exclude=["tests"]),
     python_requires=">=3.8",
     install_requires=[
-        "numpy"
+        "jax",
+        "flax",
+        "distrax",
+        "gymnax",
+        "optax",
+        "numpy",
+        "matplotlib",
+        "hydra-core",
+        "omegaconf",
+        "wandb",
+        "jaxpruner @ git+https://github.com/google-research/jaxpruner.git"
     ],
     extras_require=extras_require,
     <<requires::testing test_suite="pytest", endrequires::testing>>

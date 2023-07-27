@@ -227,7 +227,8 @@ def help(args: List[str]) -> str:
     err = f"Unrecognized command {' '.join(args)}."
     usage = f"Please use as `{args[0]} [config-kind]`"
     config_descriptions = [
-        f"{name}\n\t" + "\n\t".join([f"{key} - {val}" for key, val in config.items()])
+        f"{name}\n\t" +
+        "\n\t".join([f"{key} - {val}" for key, val in config.items()])
         for name, config in predefined_configs.items()
     ]
     return "\n".join(
@@ -269,7 +270,8 @@ def find_and_replace(data: str, key: str, value: Union[str, bool]) -> str:
         ends = find_all(data, end_sequence)
 
         if len(starts) != len(ends):
-            raise SyntaxError(f"{start_sequence} and {end_sequence} are not balanced")
+            raise SyntaxError(
+                f"{start_sequence} and {end_sequence} are not balanced")
 
         if len(starts) == 0:
             break
@@ -288,7 +290,7 @@ def find_and_replace(data: str, key: str, value: Union[str, bool]) -> str:
 
             beginning = data[:start]
             content = data[content_start:content_end]
-            ending = data[end + len(end_sequence) :]
+            ending = data[end + len(end_sequence):]
 
             # Remove spaces, tabs, newlines, ...
             content = content.lstrip()
@@ -301,7 +303,7 @@ def find_and_replace(data: str, key: str, value: Union[str, bool]) -> str:
             beginning = data[:start]
             # beginning = beginning.rstrip()
 
-            ending = data[end + len(end_sequence) :]
+            ending = data[end + len(end_sequence):]
             ending = ending.lstrip()
 
             data = beginning + ending

@@ -80,16 +80,22 @@ def make_train(cfg):
         return cfg.LR * frac
 
     def train(ent_coef, rng):
-        # Network pruning
-        sparsity_distribution = functools.partial(jaxpruner.sparsity_distributions.uniform, sparsity=cfg.SPARSITY)
-        pruner = jaxpruner.MagnitudePruning(sparsity_distribution_fn=sparsity_distribution)
         # INIT NETWORK
         network = ActorCritic(env.action_space(
             env_params).n, activation=cfg.ACTIVATION)
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros(env.observation_space(env_params).shape)
-        pruned_params, mask = pruner.instant_sparsify(network.init(_rng, init_x))
+        # Network pruning
+        # sparsity_distribution = functools.partial(
+        #     jaxpruner.sparsity_distributions.uniform, sparsity=cfg.SPARSITY)
+        # pruner = jaxpruner.MagnitudePruning(
+        #     sparsity_distribution_fn=sparsity_distribution,
+        #     sparsity_type=jaxpruner.sparsity_types.NByM(64, 64))
+        # pruned_params, mask = pruner.instant_sparsify(
+        #    network.init(_rng, init_x))
+        pruned_params = network.init(_rng, init_x)
         network_params = pruned_params
+
         if cfg.ANNEAL_LR:
             tx = optax.chain(
                 optax.clip_by_global_norm(cfg.MAX_GRAD_NORM),
@@ -211,7 +217,7 @@ def make_train(cfg):
                         total_loss = (
                             loss_actor
                             + cfg.VF_COEF * value_loss
-                            - ent_coef * entropy
+                            - ent_coef * entropy  # check ent_coef
                         )
                         return total_loss, (value_loss, loss_actor, entropy)
 
@@ -224,8 +230,7 @@ def make_train(cfg):
 
                 train_state, traj_batch, advantages, targets, rng = update_state
                 rng, _rng = jax.random.split(rng)
-                batch_size = cfg.MINIBATCH_SIZE * \
-                    cfg.NUM_MINIBATCHES
+                batch_size = cfg.MINIBATCH_SIZE * cfg.NUM_MINIBATCHES
                 assert (
                     batch_size == cfg.NUM_STEPS * cfg.NUM_ENVS
                 ), "batch size must be equal to number of steps * number of envs"
@@ -267,15 +272,13 @@ def make_train(cfg):
             _update_step, runner_state, None, cfg.NUM_UPDATES
         )
         return {"runner_state": runner_state, "metrics": metric}
-
     return train
 
 
-ent_coef_search = jnp.array([0.005])
-prune_param = jnp.array([0.8, 0.9, 0.95, 0.99])
+ent_coef_search = jnp.array([0.01, 0.001, 0.005])
 
 rng = jax.random.PRNGKey(42)
-rngs = jax.random.split(rng, 5)
+rngs = jax.random.split(rng, 1)
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
@@ -293,18 +296,30 @@ def main(cfg: DictConfig):
 
     print(f"time: {time.time() - t0:.2f} s")
 
+    count = 0
+    final_params = outs["runner_state"][0].params["params"]
+    print(final_params)
+    for dense in final_params:
+        if "kernel" in final_params[dense]:
+            kernel = final_params[dense]["kernel"]
+            norms = jnp.linalg.norm(kernel, axis=-1, keepdims=True)
+            normalized_weights = kernel / norms
+            count += jnp.sum(jnp.any(normalized_weights < 0.1, axis=1))
+    print(count)
     # output_config_path = "updated_config.yaml"
     # OmegaConf.save(cfg, output_config_path)
-    wandb.config = OmegaConf.to_container(cfg, resolve=True, throw_on_missing=True)
-    wandb.init(project="SAFS-RL")
+    # wandb.config = OmegaConf.to_container(
+    #    cfg, resolve=True, throw_on_missing=True)
+    # wandb.init(project="SAFS-RL")
 
     def moving_average(input, window_size):
         return np.convolve(input, np.ones(window_size), 'valid') / window_size
 
-    window_size = 100
+    window_size = 1
     mean_returns = np.mean(
         outs["metrics"]["returned_episode_returns"], axis=(1, 3))
-    std_returns = np.std(outs["metrics"]["returned_episode_returns"], axis=(1, 3))
+    std_returns = np.std(
+        outs["metrics"]["returned_episode_returns"], axis=(1, 3))
     mean_returns = mean_returns.reshape(len(ent_coef_search), -1)
     std_returns = std_returns.reshape(len(ent_coef_search), -1)
 
@@ -316,16 +331,17 @@ def main(cfg: DictConfig):
                  label="alpha={:.3f}".format(ent_coef_search[i]))
         plt.fill_between(np.arange(window_size - 1, len(mean_returns[i])),
                          lower_bound, upper_bound, alpha=0.3)
-        for step, mean_return in enumerate(moving_avg):
-            title = f"Mean Return (Sparsity: {cfg.SPARSITY})"
-        #    wandb.log({title: mean_return}, step=step)
 
-        plt.legend()
-        plt.xlabel("Update Step")
-        plt.ylabel("Return")
-        # wandb.log({"Plot": plt})
-        plt.close()
-    # plt.show()
+        for step, mean_return in enumerate(moving_avg):
+            for ent_coef in ent_coef_search:
+                title = f"Mean Return (Sparsity: {cfg.SPARSITY} ent_coef: {ent_coef:.3f})"
+                # wandb.log(
+                #   {title: mean_return, title + " std_return": std_returns[i]}, step=step)
+
+    plt.legend()
+    plt.xlabel("Update Step")
+    plt.ylabel("Return")
+    plt.show()
 
 
 if __name__ == "__main__":

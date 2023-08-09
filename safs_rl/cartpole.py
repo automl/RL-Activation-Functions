@@ -16,6 +16,9 @@ from omegaconf import DictConfig, OmegaConf
 import wandb
 import jaxpruner
 import functools
+from rliable import library as rly
+from rliable import metrics
+from rliable import plot_utils
 
 
 class ActorCritic(nn.Module):
@@ -24,10 +27,23 @@ class ActorCritic(nn.Module):
 
     @nn.compact
     def __call__(self, x):
-        if self.activation == "relu":
-            activation = nn.relu
+        if self.activation == "relu6":
+            activation = nn.relu6
+        elif self.activation == "hardswish":
+            activation = nn.hard_swish
+        elif self.activation == "swish":
+            activation = nn.swish
+        elif self.activation == "gelu":
+            activation = nn.gelu
+        elif self.activation == "elu":
+            activation = nn.elu
+        elif self.activation == "softplus":
+            activation = nn.softplus
+        elif self.activation == "logsigmiod":
+            activation = nn.log_sigmoid
         else:
             activation = nn.tanh
+
         actor_mean = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(x)
@@ -79,21 +95,22 @@ def make_train(cfg):
                       * cfg.UPDATE_EPOCHS) / cfg.NUM_UPDATES)
         return cfg.LR * frac
 
-    def train(ent_coef, rng):
+    def train(rng):
         # INIT NETWORK
+        # ent_coef = jnp.array([0.01, 0.005, 0.001])
+        ent_coef = cfg.ENT_COEF
         network = ActorCritic(env.action_space(
             env_params).n, activation=cfg.ACTIVATION)
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros(env.observation_space(env_params).shape)
         # Network pruning
-        # sparsity_distribution = functools.partial(
-        #     jaxpruner.sparsity_distributions.uniform, sparsity=cfg.SPARSITY)
-        # pruner = jaxpruner.MagnitudePruning(
-        #     sparsity_distribution_fn=sparsity_distribution,
-        #     sparsity_type=jaxpruner.sparsity_types.NByM(64, 64))
-        # pruned_params, mask = pruner.instant_sparsify(
-        #    network.init(_rng, init_x))
-        pruned_params = network.init(_rng, init_x)
+        sparsity_distribution = functools.partial(
+            jaxpruner.sparsity_distributions.uniform, sparsity=cfg.SPARSITY)
+        pruner = jaxpruner.MagnitudePruning(
+            sparsity_distribution_fn=sparsity_distribution,
+            sparsity_type=jaxpruner.sparsity_types.NByM(64, 64))
+        pruned_params, mask = pruner.instant_sparsify(
+            network.init(_rng, init_x))
         network_params = pruned_params
 
         if cfg.ANNEAL_LR:
@@ -275,73 +292,39 @@ def make_train(cfg):
     return train
 
 
-ent_coef_search = jnp.array([0.01, 0.001, 0.005])
+ent_coef_search = jnp.array([0.005])  # not used
 
+num_seeds = 10
 rng = jax.random.PRNGKey(42)
-rngs = jax.random.split(rng, 1)
+rngs = jax.random.split(rng, num_seeds)
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig):
     t0 = time.time()
-    train_vvjit = jax.jit(
-        jax.vmap(
-            jax.vmap(
-                make_train(cfg), in_axes=(None, 0)
-            ), in_axes=(0, None)
-        )
-    )
-
-    outs = train_vvjit(ent_coef_search, rngs)
-
-    print(f"time: {time.time() - t0:.2f} s")
-
-    count = 0
-    final_params = outs["runner_state"][0].params["params"]
-    print(final_params)
-    for dense in final_params:
-        if "kernel" in final_params[dense]:
-            kernel = final_params[dense]["kernel"]
-            norms = jnp.linalg.norm(kernel, axis=-1, keepdims=True)
-            normalized_weights = kernel / norms
-            count += jnp.sum(jnp.any(normalized_weights < 0.1, axis=1))
-    print(count)
-    # output_config_path = "updated_config.yaml"
-    # OmegaConf.save(cfg, output_config_path)
-    # wandb.config = OmegaConf.to_container(
-    #    cfg, resolve=True, throw_on_missing=True)
-    # wandb.init(project="SAFS-RL")
-
-    def moving_average(input, window_size):
-        return np.convolve(input, np.ones(window_size), 'valid') / window_size
-
-    window_size = 1
-    mean_returns = np.mean(
-        outs["metrics"]["returned_episode_returns"], axis=(1, 3))
-    std_returns = np.std(
-        outs["metrics"]["returned_episode_returns"], axis=(1, 3))
-    mean_returns = mean_returns.reshape(len(ent_coef_search), -1)
-    std_returns = std_returns.reshape(len(ent_coef_search), -1)
-
-    for i in range(len(ent_coef_search)):
-        moving_avg = moving_average(mean_returns[i], window_size)
-        upper_bound = moving_avg + std_returns[i][window_size - 1:]
-        lower_bound = moving_avg - std_returns[i][window_size - 1:]
-        plt.plot(np.arange(window_size - 1, len(mean_returns[i])), moving_avg,
-                 label="alpha={:.3f}".format(ent_coef_search[i]))
-        plt.fill_between(np.arange(window_size - 1, len(mean_returns[i])),
-                         lower_bound, upper_bound, alpha=0.3)
-
-        for step, mean_return in enumerate(moving_avg):
-            for ent_coef in ent_coef_search:
-                title = f"Mean Return (Sparsity: {cfg.SPARSITY} ent_coef: {ent_coef:.3f})"
-                # wandb.log(
-                #   {title: mean_return, title + " std_return": std_returns[i]}, step=step)
-
-    plt.legend()
-    plt.xlabel("Update Step")
-    plt.ylabel("Return")
-    plt.show()
+    activation = [
+        'relu6', 'hardswish', 'swish', 'gelu',
+        'elu', 'tanh', 'softplus', 'logsigmiod'
+    ]
+    for af in activation:
+        wandb.config = OmegaConf.to_container(
+            cfg, resolve=True, throw_on_missing=True)
+        wandb.init(project="SAFS-RL", name=af)
+        cfg.ACTIVATION = af
+        print(af)
+        train_vvjit = jax.jit(jax.vmap(make_train(cfg)))
+        outs = train_vvjit(rngs)
+        print(f"time: {time.time() - t0:.2f} s")
+        outs = outs["metrics"]["returned_episode_returns"]
+        IQM_values = np.array([metrics.aggregate_iqm(outs[:, t])
+                               for t in range(int(cfg.NUM_UPDATES))])
+        mean_returns = np.zeros(int(cfg.NUM_UPDATES))
+        for t in range(int(cfg.NUM_UPDATES)):
+            mean_returns[t] = np.mean(outs[:, t])
+        for step in range(int(cfg.NUM_UPDATES)):
+            wandb.log(
+                {af + " IQM": IQM_values[step], af + " Mean": mean_returns[step]}, step=step)
+        wandb.finish()
 
 
 if __name__ == "__main__":

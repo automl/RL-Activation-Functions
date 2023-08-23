@@ -46,8 +46,8 @@ setuptools.setup(
         "hydra-core",
         "omegaconf",
         "wandb",
-        "jaxpruner @ git+https://github.com/google-research/jaxpruner.git",
-        "rliable @ git+https://github.com/google-research/rliable",
+        "jaxpruner@git+https://github.com/google-research/jaxpruner.git",
+        "rliable@git+https://github.com/google-research/rliable.git",
         "inflection"
     ],
     extras_require=extras_require,

@@ -24,26 +24,36 @@ from rliable import plot_utils
 class ActorCritic(nn.Module):
     action_dim: Sequence[int]
     activation: str = "tanh"
+    critic: str = "elu"
+
+    def set_activation(self, new_activation: str):
+        self.activation = new_activation
+        self.critic = new_activation
 
     @nn.compact
     def __call__(self, x):
-        if self.activation == "relu6":
-            activation = nn.relu6
-        elif self.activation == "hardswish":
-            activation = nn.hard_swish
-        elif self.activation == "swish":
-            activation = nn.swish
-        elif self.activation == "gelu":
-            activation = nn.gelu
-        elif self.activation == "elu":
-            activation = nn.elu
-        elif self.activation == "softplus":
-            activation = nn.softplus
-        elif self.activation == "logsigmiod":
-            activation = nn.log_sigmoid
-        else:
-            activation = nn.tanh
-
+        def activation_fucntion(activation_function):
+            if activation_function == "relu6":
+                af = nn.relu6
+            elif activation_function == "hardswish":
+                af = nn.hard_swish
+            elif activation_function == "swish":
+                af = nn.swish
+            elif activation_function == "gelu":
+                af = nn.gelu
+            elif activation_function == "elu":
+                af = nn.elu
+            elif activation_function == "softplus":
+                af = nn.softplus
+            elif activation_function == "logsigmoid":
+                af = nn.log_sigmoid
+            elif activation_function == "tanh":
+                af = nn.tanh
+            else:
+                af = nn.tanh
+            return af
+        af_policy = activation_fucntion(self.activation)
+        activation = af_policy
         actor_mean = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(x)
@@ -57,6 +67,8 @@ class ActorCritic(nn.Module):
         )(actor_mean)
         pi = distrax.Categorical(logits=actor_mean)
 
+        af_critic = activation_fucntion(self.critic)
+        activation = af_critic
         critic = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(x)
@@ -100,19 +112,18 @@ def make_train(cfg):
         # ent_coef = jnp.array([0.01, 0.005, 0.001])
         ent_coef = cfg.ENT_COEF
         network = ActorCritic(env.action_space(
-            env_params).n, activation=cfg.ACTIVATION)
+            env_params).n, activation=cfg.ACTIVATION, critic=cfg.CRITIC_ACTIVATION)
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros(env.observation_space(env_params).shape)
         # Network pruning
-        sparsity_distribution = functools.partial(
-            jaxpruner.sparsity_distributions.uniform, sparsity=cfg.SPARSITY)
-        pruner = jaxpruner.MagnitudePruning(
-            sparsity_distribution_fn=sparsity_distribution,
-            sparsity_type=jaxpruner.sparsity_types.NByM(64, 64))
-        pruned_params, mask = pruner.instant_sparsify(
-            network.init(_rng, init_x))
-        network_params = pruned_params
-
+        # sparsity_distribution = functools.partial(
+        #     jaxpruner.sparsity_distributions.uniform, sparsity=cfg.SPARSITY)
+        # pruner = jaxpruner.MagnitudePruning(
+        #     sparsity_distribution_fn=sparsity_distribution,
+        #     sparsity_type=jaxpruner.sparsity_types.NByM(64, 64))
+        # pruned_params, mask = pruner.instant_sparsify(
+        #     network.init(_rng, init_x))
+        network_params = network.init(_rng, init_x)
         if cfg.ANNEAL_LR:
             tx = optax.chain(
                 optax.clip_by_global_norm(cfg.MAX_GRAD_NORM),
@@ -282,49 +293,97 @@ def make_train(cfg):
 
             runner_state = (train_state, env_state, last_obs, rng)
             return runner_state, metric
-
         rng, _rng = jax.random.split(rng)
         runner_state = (train_state, env_state, obsv, _rng)
-        runner_state, metric = jax.lax.scan(
-            _update_step, runner_state, None, cfg.NUM_UPDATES
+        interval = round(cfg.NUM_UPDATES / 2)
+        runner_state, metric_1 = jax.lax.scan(
+            _update_step, runner_state, None, interval
         )
+        # network.set_activation("elu")
+        # train_state = TrainState.replace(
+        #    train_state, apply_fn=network.apply, params=runner_state[0].params)
+        # runner_state = (train_state, runner_state[1],
+        #                runner_state[2], runner_state[3])
+        runner_state, metric_2 = jax.lax.scan(
+            _update_step, runner_state, None, cfg.NUM_UPDATES - interval
+        )
+        metric = {}
+        for entry in metric_1:
+            metric[entry] = jnp.concatenate(
+                (metric_1[entry], metric_2[entry]), axis=0)
+        # runner_state, metric = jax.lax.scan(
+        #    _update_step, runner_state, None, cfg.NUM_UPDATES
+        # )
         return {"runner_state": runner_state, "metrics": metric}
     return train
 
 
-ent_coef_search = jnp.array([0.005])  # not used
-
 num_seeds = 10
 rng = jax.random.PRNGKey(42)
 rngs = jax.random.split(rng, num_seeds)
+window_size = 10000
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="config")
+def moving_avg(arr):
+    num_seeds, num_updates, num_steps, num_envs = arr.shape
+    moving_average = np.zeros((
+        num_seeds, num_updates * num_steps * num_envs - window_size + 1), dtype=float)
+    for seeds in range(num_seeds):
+        data = arr[seeds].reshape(-1)
+        moving_average_values = np.convolve(
+            data, np.ones(window_size) / window_size, mode='valid')
+        moving_average[seeds] = moving_average_values
+    return moving_average
+
+
+@hydra.main(version_base=None, config_path="configs", config_name="config_minatar")
 def main(cfg: DictConfig):
     t0 = time.time()
-    activation = [
-        'relu6', 'hardswish', 'swish', 'gelu',
-        'elu', 'tanh', 'softplus', 'logsigmiod'
-    ]
-    for af in activation:
-        wandb.config = OmegaConf.to_container(
-            cfg, resolve=True, throw_on_missing=True)
-        wandb.init(project="SAFS-RL", name=af)
-        cfg.ACTIVATION = af
-        print(af)
-        train_vvjit = jax.jit(jax.vmap(make_train(cfg)))
-        outs = train_vvjit(rngs)
-        print(f"time: {time.time() - t0:.2f} s")
-        outs = outs["metrics"]["returned_episode_returns"]
-        IQM_values = np.array([metrics.aggregate_iqm(outs[:, t])
-                               for t in range(int(cfg.NUM_UPDATES))])
-        mean_returns = np.zeros(int(cfg.NUM_UPDATES))
-        for t in range(int(cfg.NUM_UPDATES)):
-            mean_returns[t] = np.mean(outs[:, t])
-        for step in range(int(cfg.NUM_UPDATES)):
-            wandb.log(
-                {af + " IQM": IQM_values[step], af + " Mean": mean_returns[step]}, step=step)
-        wandb.finish()
+    activation = cfg.ACTIVATION_FUNCTIONS.split(", ")
+    activation_fixed = ["gelu"]
+    for af_policy in activation:
+        IQM_values_list = []
+        for af_critic in activation:
+            cfg.ACTIVATION = af_policy
+            cfg.CRITIC_ACTIVATION = af_critic
+            print("Policy: ", af_policy, "Critic: ", af_critic)
+            train_vvjit = jax.jit(jax.vmap(make_train(cfg)))
+            outs = train_vvjit(rngs)
+            outs = outs["metrics"]["returned_episode_returns"]
+            print(f"time: {time.time() - t0:.2f} s")
+            average_values = moving_avg(outs)
+            num_steps = average_values.shape[1]
+            IQM_values = np.array([metrics.aggregate_iqm(average_values[:, t])
+                                   for t in range(num_steps)])
+            IQM_values_list.append(IQM_values)
+
+        # wandb.config = OmegaConf.to_container(
+        #     cfg, resolve=True, throw_on_missing=True)
+        # wandb.init(project="SAFS-RL", name=af)
+        # for step in range(num_steps):
+        #    wandb.log(
+        #        {af + " IQM": IQM_values[step], af + " Mean": mean_returns[step]}, step=step)
+        # wandb.finish()
+
+        np.save("{env}_IQM_critic_{af}".format(
+            env=cfg.ENV_NAME, af=af_critic), IQM_values_list)
+        # IQM_values_list = np.load("AF_Gelu_allTimesteps/Critic_gelu_default.npy")
+        num_steps = 2.5e6
+        plt.figure(figsize=(10, 6))
+        for i, af_critic in enumerate(activation):
+            std_IQM = np.std(IQM_values_list[i][:num_steps])
+            lower_bound = IQM_values_list[i][:num_steps] - std_IQM
+            upper_bound = IQM_values_list[i][:num_steps] + std_IQM
+            plt.plot(range(num_steps),
+                     IQM_values_list[i][:num_steps], label=f"{af_critic} critic")
+            plt.fill_between(range(num_steps),
+                             lower_bound, upper_bound, alpha=0.2)
+        plt.xlabel("Number of Steps")
+        plt.ylabel("Returns")
+        plt.title("IQM returns for policy: {}".format(af_policy))
+        plt.legend()
+        plt.savefig("{env}_IQM_policy_{af}.png".format(
+            env=cfg.ENV_NAME, af=af_policy))
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ import functools
 from rliable import library as rly
 from rliable import metrics
 from rliable import plot_utils
-
+import braxwrapper as braxwrap
 
 class ActorCritic(nn.Module):
     action_dim: Sequence[int]
@@ -55,26 +55,27 @@ class ActorCritic(nn.Module):
         af_policy = activation_fucntion(self.activation)
         activation = af_policy
         actor_mean = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(x)
         actor_mean = activation(actor_mean)
         actor_mean = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(actor_mean)
         actor_mean = activation(actor_mean)
         actor_mean = nn.Dense(
             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
         )(actor_mean)
-        pi = distrax.Categorical(logits=actor_mean)
+        actor_logtstd = self.param("log_std", nn.initializers.zeros, (self.action_dim,))
+        pi = distrax.MultivariateNormalDiag(actor_mean, jnp.exp(actor_logtstd))
 
         af_critic = activation_fucntion(self.critic)
         activation = af_critic
         critic = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(x)
         critic = activation(critic)
         critic = nn.Dense(
-            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(critic)
         critic = activation(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
@@ -98,10 +99,13 @@ def make_train(cfg):
     cfg.NUM_UPDATES = cfg.TOTAL_TIMESTEPS // cfg.NUM_STEPS // cfg.NUM_ENVS
     cfg.MINIBATCH_SIZE = cfg.NUM_ENVS * cfg.NUM_STEPS // cfg.NUM_MINIBATCHES
     
-    env, env_params = gymnax.make(cfg.ENV_NAME)
-    env = FlattenObservationWrapper(env)
+    env, env_params = braxwrap.BraxGymnaxWrapper(cfg.ENV_NAME), None
     env = LogWrapper(env)
-
+    env = braxwrap.ClipAction(env)
+    env = braxwrap.VecEnv(env)
+    if(cfg.NORMALIZE_ENV):
+        env = braxwrap.NormalizeVecObservation(env)
+        env = braxwrap.NormalizeVecReward(env, cfg.GAMMA)
     def linear_schedule(count):
         frac = 1.0 - (count // (cfg.NUM_MINIBATCHES
                       * cfg.UPDATE_EPOCHS) / cfg.NUM_UPDATES)
@@ -111,8 +115,7 @@ def make_train(cfg):
         # INIT NETWORK
         # ent_coef = jnp.array([0.01, 0.005, 0.001])
         ent_coef = cfg.ENT_COEF
-        network = ActorCritic(env.action_space(
-            env_params).n, activation=cfg.ACTIVATION, critic=cfg.CRITIC_ACTIVATION)
+        network = ActorCritic(env.action_space(env_params).shape[0], activation=cfg.ACTIVATION, critic=cfg.CRITIC_ACTIVATION)
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros(env.observation_space(env_params).shape)
         # Network pruning
@@ -141,8 +144,7 @@ def make_train(cfg):
         # INIT ENV
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, cfg.NUM_ENVS)
-        obsv, env_state = jax.vmap(
-            env.reset, in_axes=(0, None))(reset_rng, env_params)
+        obsv, env_state = env.reset(reset_rng, env_params)
 
         # TRAIN LOOP
         def _update_step(runner_state, unused):
@@ -159,9 +161,7 @@ def make_train(cfg):
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
                 rng_step = jax.random.split(_rng, cfg.NUM_ENVS)
-                obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
-                    rng_step, env_state, action, env_params
-                )
+                obsv, env_state, reward, done, info = env.step(rng_step, env_state, action, env_params)
                 transition = Transition(
                     done, action, value, reward, log_prob, last_obs, info
                 )
@@ -184,12 +184,10 @@ def make_train(cfg):
                         transition.value,
                         transition.reward,
                     )
-                    delta = reward + cfg.GAMMA * \
-                        next_value * (1 - done) - value
+                    delta = reward + cfg.GAMMA * next_value * (1 - done) - value
                     gae = (
                         delta
-                        + cfg.GAMMA *
-                        cfg.GAE_LAMBDA * (1 - done) * gae
+                        + cfg.GAMMA * cfg.GAE_LAMBDA * (1 - done) * gae
                     )
                     return (gae, value), gae
 
@@ -219,11 +217,9 @@ def make_train(cfg):
                             value - traj_batch.value
                         ).clip(-cfg.CLIP_EPS, cfg.CLIP_EPS)
                         value_losses = jnp.square(value - targets)
-                        value_losses_clipped = jnp.square(
-                            value_pred_clipped - targets)
+                        value_losses_clipped = jnp.square(value_pred_clipped - targets)
                         value_loss = (
-                            0.5 * jnp.maximum(value_losses,
-                                              value_losses_clipped).mean()
+                            0.5 * jnp.maximum(value_losses, value_losses_clipped).mean()
                         )
 
                         # CALCULATE ACTOR LOSS
@@ -245,7 +241,7 @@ def make_train(cfg):
                         total_loss = (
                             loss_actor
                             + cfg.VF_COEF * value_loss
-                            - ent_coef * entropy  # check ent_coef
+                            - cfg.ENT_COEF * entropy
                         )
                         return total_loss, (value_loss, loss_actor, entropy)
 
@@ -279,8 +275,7 @@ def make_train(cfg):
                 train_state, total_loss = jax.lax.scan(
                     _update_minbatch, train_state, minibatches
                 )
-                update_state = (train_state, traj_batch,
-                                advantages, targets, rng)
+                update_state = (train_state, traj_batch, advantages, targets, rng)
                 return update_state, total_loss
 
             update_state = (train_state, traj_batch, advantages, targets, rng)
@@ -291,71 +286,63 @@ def make_train(cfg):
             metric = traj_batch.info
             rng = update_state[-1]
 
+
             runner_state = (train_state, env_state, last_obs, rng)
             return runner_state, metric
+
+
         rng, _rng = jax.random.split(rng)
         runner_state = (train_state, env_state, obsv, _rng)
-        interval = round(cfg.NUM_UPDATES / 2)
-        runner_state, metric_1 = jax.lax.scan(
-            _update_step, runner_state, None, interval
+        runner_state, metric = jax.lax.scan(
+            _update_step, runner_state, None, cfg.NUM_UPDATES
         )
-        # network.set_activation("elu")
-        # train_state = TrainState.replace(
-        #    train_state, apply_fn=network.apply, params=runner_state[0].params)
-        # runner_state = (train_state, runner_state[1],
-        #                runner_state[2], runner_state[3])
-        runner_state, metric_2 = jax.lax.scan(
-            _update_step, runner_state, None, cfg.NUM_UPDATES - interval
-        )
-        metric = {}
-        for entry in metric_1:
-            metric[entry] = jnp.concatenate(
-                (metric_1[entry], metric_2[entry]), axis=0)
-        # runner_state, metric = jax.lax.scan(
-        #    _update_step, runner_state, None, cfg.NUM_UPDATES
-        # )
         return {"runner_state": runner_state, "metrics": metric}
+
     return train
 
 
-num_seeds = 10
-rng = jax.random.PRNGKey(42)
+num_seeds = 5
+rng = jax.random.PRNGKey(30)
 rngs = jax.random.split(rng, num_seeds)
-window_size = 10000
+window_size = 10
 
 
 def moving_avg(arr):
     num_seeds, num_updates, num_steps, num_envs = arr.shape
     moving_average = np.zeros((
-        num_seeds, num_updates * num_steps * num_envs - window_size + 1), dtype=float)
+        num_seeds, num_updates - window_size + 1), dtype=float)
     for seeds in range(num_seeds):
-        data = arr[seeds].reshape(-1)
-        moving_average_values = np.convolve(
-            data, np.ones(window_size) / window_size, mode='valid')
-        moving_average[seeds] = moving_average_values
+        data = arr[seeds]
+        for update in range(num_updates - window_size + 1):
+            window = data[update : update + window_size]
+            window_mean = np.mean(window)
+            moving_average[seeds, update] = window_mean
+            
     return moving_average
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="config_minatar")
+@hydra.main(version_base=None, config_path="configs", config_name="config_brax")
 def main(cfg: DictConfig):
     t0 = time.time()
     activation = cfg.ACTIVATION_FUNCTIONS.split(", ")
-    activation_fixed = ["softplus"]
-    for af_critic in activation_fixed:
+    activation_fixed = ["tanh"]
+    for af_policy in activation_fixed:
         IQM_values_list = []
-        # for af_critic in activation:
-        #     cfg.ACTIVATION = af_policy
-        #     cfg.CRITIC_ACTIVATION = af_critic
-        #     print("Policy: ", af_policy, "Critic: ", af_critic)
-        #     train_vvjit = jax.jit(jax.vmap(make_train(cfg)))
-        #     outs = train_vvjit(rngs)
-        #     outs = outs["metrics"]["returned_episode_returns"]
-        #     print(f"time: {time.time() - t0:.2f} s")
-        #     average_values = moving_avg(outs)
-        #     num_steps = average_values.shape[1]
-        #     IQM_values = np.array([metrics.aggregate_iqm(average_values[:, t])
-        #                            for t in range(num_steps)])
-        #     IQM_values_list.append(IQM_values)
+        for af_critic in activation_fixed:
+            cfg.ACTIVATION = af_policy
+            cfg.CRITIC_ACTIVATION = af_critic
+            print("Policy: ", af_policy, "Critic: ", af_critic)
+            train_vvjit = jax.jit(jax.vmap(make_train(cfg)))
+            outs = train_vvjit(rngs)
+            outs = outs["metrics"]["returned_episode_returns"]
+            print(f"time: {time.time() - t0:.2f} s")
+            average_values = moving_avg(outs)
+            
+            num_steps = average_values.shape[1]
+            IQM_values = np.array([metrics.aggregate_iqm(average_values[:, t])
+                                   for t in range(num_steps)])
+            IQM_values_list.append(IQM_values)
+            print(f"time: {time.time() - t0:.2f} s")
 
         # wandb.config = OmegaConf.to_container(
         #     cfg, resolve=True, throw_on_missing=True)
@@ -365,26 +352,25 @@ def main(cfg: DictConfig):
         #        {af + " IQM": IQM_values[step], af + " Mean": mean_returns[step]}, step=step)
         # wandb.finish()
 
-        # np.save("{env}_IQM_critic_{af}".format(
-        #     env=cfg.ENV_NAME, af=af_critic), IQM_values_list)
-        IQM_values_list = np.load("SpaceInvaders-MinAtar_IQM_critic_softplus.npy")
-        num_steps = 4000000
+        np.save("{env}_IQM_policy_{af}".format(
+            env=cfg.ENV_NAME, af=af_policy), IQM_values_list)
+        #IQM_values_list = np.load("SpaceInvaders-MinAtar_IQM_critic_softplus.npy")
+        num_steps = num_steps
         plt.figure(figsize=(10, 6))
-        for i, af_policy in enumerate(activation):
+        for i, af_critic in enumerate(activation_fixed):
             std_IQM = np.std(IQM_values_list[i])
             lower_bound = IQM_values_list[i][:num_steps] - std_IQM
             upper_bound = IQM_values_list[i][:num_steps] + std_IQM
             plt.plot(range(num_steps),
-                     IQM_values_list[i][:num_steps], label=f"{af_policy} policy")
+                     IQM_values_list[i][:num_steps], label=f"{af_critic} critic")
             plt.fill_between(range(num_steps),
                              lower_bound, upper_bound, alpha=0.2)
-        plt.ylim(0, 150)
         plt.xlabel("Number of Steps")
         plt.ylabel("Returns")
-        plt.title("IQM returns for critic: {}".format(af_critic))
+        plt.title("IQM returns for policy: {}".format(af_policy))
         plt.legend()
-        plt.savefig("{env}_IQM_critic_{af}_04e7.png".format(
-            env=cfg.ENV_NAME, af=af_critic))
+        plt.savefig("{env}_IQM_policy_{af}.png".format(
+            env=cfg.ENV_NAME, af=af_policy))
 
 
 if __name__ == "__main__":

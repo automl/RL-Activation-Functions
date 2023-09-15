@@ -336,26 +336,27 @@ def moving_avg(arr):
     return moving_average
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="config_minatar")
+@hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig):
     t0 = time.time()
     activation = cfg.ACTIVATION_FUNCTIONS.split(", ")
-    activation_fixed = ["softplus"]
-    for af_critic in activation_fixed:
+    activation_fixed = ["tanh"]
+    for af_critic in activation:
         IQM_values_list = []
-        # for af_critic in activation:
-        #     cfg.ACTIVATION = af_policy
-        #     cfg.CRITIC_ACTIVATION = af_critic
-        #     print("Policy: ", af_policy, "Critic: ", af_critic)
-        #     train_vvjit = jax.jit(jax.vmap(make_train(cfg)))
-        #     outs = train_vvjit(rngs)
-        #     outs = outs["metrics"]["returned_episode_returns"]
-        #     print(f"time: {time.time() - t0:.2f} s")
-        #     average_values = moving_avg(outs)
-        #     num_steps = average_values.shape[1]
-        #     IQM_values = np.array([metrics.aggregate_iqm(average_values[:, t])
-        #                            for t in range(num_steps)])
-        #     IQM_values_list.append(IQM_values)
+        for af_policy in activation:
+            cfg.ACTIVATION = af_policy
+            cfg.CRITIC_ACTIVATION = af_critic
+            print("Policy: ", af_policy, "Critic: ", af_critic)
+            train_vvjit = jax.jit(jax.vmap(make_train(cfg)))
+            outs = train_vvjit(rngs)
+            outs = outs["metrics"]["returned_episode_returns"]
+            print(f"time: {time.time() - t0:.2f} s")
+            average_values = moving_avg(outs)
+            num_steps = average_values.shape[1]
+            IQM_values = np.array([metrics.aggregate_iqm(average_values[:, t])
+                                   for t in range(num_steps)])
+            IQM_values_list.append(IQM_values)
+            print(f"time: {time.time() - t0:.2f} s")
 
         # wandb.config = OmegaConf.to_container(
         #     cfg, resolve=True, throw_on_missing=True)
@@ -365,10 +366,10 @@ def main(cfg: DictConfig):
         #        {af + " IQM": IQM_values[step], af + " Mean": mean_returns[step]}, step=step)
         # wandb.finish()
 
-        # np.save("{env}_IQM_critic_{af}".format(
-        #     env=cfg.ENV_NAME, af=af_critic), IQM_values_list)
-        IQM_values_list = np.load("SpaceInvaders-MinAtar_IQM_critic_softplus.npy")
-        num_steps = 4000000
+        np.save("{env}_IQM_critic_{af}".format(
+            env=cfg.ENV_NAME, af=af_critic), IQM_values_list)
+        #IQM_values_list = np.load("AF_Gelu_allTimesteps/IQM_criticgelu.npy")
+        num_steps = 250000
         plt.figure(figsize=(10, 6))
         for i, af_policy in enumerate(activation):
             std_IQM = np.std(IQM_values_list[i])
@@ -378,12 +379,11 @@ def main(cfg: DictConfig):
                      IQM_values_list[i][:num_steps], label=f"{af_policy} policy")
             plt.fill_between(range(num_steps),
                              lower_bound, upper_bound, alpha=0.2)
-        plt.ylim(0, 150)
         plt.xlabel("Number of Steps")
         plt.ylabel("Returns")
-        plt.title("IQM returns for critic: {}".format(af_critic))
+        plt.title("IQM returns for same activation function".format(af_critic))
         plt.legend()
-        plt.savefig("{env}_IQM_critic_{af}_04e7.png".format(
+        plt.savefig("{env}_IQM_critic_{af}_totalsteps.png".format(
             env=cfg.ENV_NAME, af=af_critic))
 
 

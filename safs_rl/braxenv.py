@@ -304,20 +304,16 @@ def make_train(cfg):
 num_seeds = 5
 rng = jax.random.PRNGKey(30)
 rngs = jax.random.split(rng, num_seeds)
-window_size = 10
+window_size = 100
 
 
 def moving_avg(arr):
     num_seeds, num_updates, num_steps, num_envs = arr.shape
-    moving_average = np.zeros((
-        num_seeds, num_updates - window_size + 1), dtype=float)
-    for seeds in range(num_seeds):
-        data = arr[seeds]
-        for update in range(num_updates - window_size + 1):
-            window = data[update : update + window_size]
-            window_mean = np.mean(window)
-            moving_average[seeds, update] = window_mean
-            
+    moving_average = np.zeros((num_seeds, num_updates * num_steps - window_size + 1))
+    for i in range(num_seeds):
+        data = arr[i].mean(-1).reshape(-1)
+        moving_average_value = np.convolve(data, np.ones(window_size)/window_size, 'valid')
+        moving_average[i] = moving_average_value
     return moving_average
 
 
@@ -326,9 +322,10 @@ def main(cfg: DictConfig):
     t0 = time.time()
     activation = cfg.ACTIVATION_FUNCTIONS.split(", ")
     activation_fixed = ["tanh"]
-    for af_policy in activation_fixed:
+
+    for af_critic in activation_fixed:
         IQM_values_list = []
-        for af_critic in activation_fixed:
+        for af_policy in activation:
             cfg.ACTIVATION = af_policy
             cfg.CRITIC_ACTIVATION = af_critic
             print("Policy: ", af_policy, "Critic: ", af_critic)
@@ -351,26 +348,26 @@ def main(cfg: DictConfig):
         #    wandb.log(
         #        {af + " IQM": IQM_values[step], af + " Mean": mean_returns[step]}, step=step)
         # wandb.finish()
-
-        np.save("{env}_IQM_policy_{af}".format(
-            env=cfg.ENV_NAME, af=af_policy), IQM_values_list)
-        #IQM_values_list = np.load("SpaceInvaders-MinAtar_IQM_critic_softplus.npy")
+        
+        np.save("{env}_IQM_critic_{af}".format(
+           env=cfg.ENV_NAME, af=af_critic), IQM_values_list)
+        #IQM_values_list = np.load("Hopper_policy/hopper_IQM_policy_{af}.npy".format(af = af_critic))
         num_steps = num_steps
         plt.figure(figsize=(10, 6))
-        for i, af_critic in enumerate(activation_fixed):
+        for i, af_policy in enumerate(activation):
             std_IQM = np.std(IQM_values_list[i])
             lower_bound = IQM_values_list[i][:num_steps] - std_IQM
             upper_bound = IQM_values_list[i][:num_steps] + std_IQM
             plt.plot(range(num_steps),
-                     IQM_values_list[i][:num_steps], label=f"{af_critic} critic")
+                    IQM_values_list[i][:num_steps], label=f"{af_policy} policy")
             plt.fill_between(range(num_steps),
-                             lower_bound, upper_bound, alpha=0.2)
-        plt.xlabel("Number of Steps")
+                            lower_bound, upper_bound, alpha=0.2)
+        plt.xlabel("Number of updates")
         plt.ylabel("Returns")
-        plt.title("IQM returns for policy: {}".format(af_policy))
+        plt.title("IQM returns for critic: {}".format(af_critic))
         plt.legend()
-        plt.savefig("{env}_IQM_policy_{af}.png".format(
-            env=cfg.ENV_NAME, af=af_policy))
+        plt.savefig("{env}_IQM_critic_{af}.png".format(
+            env=cfg.ENV_NAME, af=af_critic))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 # Installation
 Install Anaconda or Miiniconda from https://docs.conda.io/projects/conda/en/latest/user-guide/install/linux.html
+Then follow the steps:
 ```bash
 git clone https://github.com/automl/SAFS-RL.git
 cd /SAFS-RL

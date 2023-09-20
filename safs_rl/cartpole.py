@@ -20,15 +20,17 @@ from rliable import library as rly
 from rliable import metrics
 from rliable import plot_utils
 
-
 class ActorCritic(nn.Module):
     action_dim: Sequence[int]
-    activation: str = "tanh"
-    critic: str = "elu"
-
-    def set_activation(self, new_activation: str):
-        self.activation = new_activation
-        self.critic = new_activation
+    activation_af: str = "elu"
+    critic_af: str = "elu"
+    activation_list: str = "elu"
+    def set_activation(self, new_activation):
+        if(isinstance(new_activation, str)):
+            self.activation = new_activation
+            self.critic = new_activation
+        else:
+            self.activation_list = new_activation
 
     @nn.compact
     def __call__(self, x):
@@ -52,31 +54,39 @@ class ActorCritic(nn.Module):
             else:
                 af = nn.tanh
             return af
-        af_policy = activation_fucntion(self.activation)
-        activation = af_policy
+        activation_list = self.activation_list.split(", ")
+        if len(activation_list) == 4:
+            af_policy_1 = activation_fucntion(activation_list[0])
+            af_policy_2 = activation_fucntion(activation_list[1])
+            af_critic_1 = activation_fucntion(activation_list[2])
+            af_critic_2 = activation_fucntion(activation_list[3])
+        else:
+            af_policy_1 = activation_fucntion(self.activation_af)
+            af_policy_2 = af_policy_1
+            af_critic_1 = activation_fucntion(self.critic_af)
+            af_critic_2 = af_critic_1
+        print("policy 1:", activation_list[0], " policy 2:", activation_list[1], " critic 1:", activation_list[2], " critic 2:", activation_list[3])
         actor_mean = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(x)
-        actor_mean = activation(actor_mean)
+        actor_mean = af_policy_1(actor_mean)
         actor_mean = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(actor_mean)
-        actor_mean = activation(actor_mean)
+        actor_mean = af_policy_2(actor_mean)
         actor_mean = nn.Dense(
             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
         )(actor_mean)
         pi = distrax.Categorical(logits=actor_mean)
 
-        af_critic = activation_fucntion(self.critic)
-        activation = af_critic
         critic = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(x)
-        critic = activation(critic)
+        critic = af_critic_1(critic)
         critic = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(critic)
-        critic = activation(critic)
+        critic = af_critic_2(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             critic
         )
@@ -111,8 +121,14 @@ def make_train(cfg):
         # INIT NETWORK
         # ent_coef = jnp.array([0.01, 0.005, 0.001])
         ent_coef = cfg.ENT_COEF
-        network = ActorCritic(env.action_space(
-            env_params).n, activation=cfg.ACTIVATION, critic=cfg.CRITIC_ACTIVATION)
+        activation_length = cfg.ACTIVATION_LIST.split(", ")
+        if len(activation_length) == 4:
+            network = ActorCritic(env.action_space(
+                env_params).n, activation_list=cfg.ACTIVATION_LIST)
+        else:
+            network = ActorCritic(env.action_space(
+                env_params).n, activation_af=cfg.ACTIVATION, critic_af=cfg.CRITIC_ACTIVATION)
+
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros(env.observation_space(env_params).shape)
         # Network pruning
@@ -341,22 +357,27 @@ def main(cfg: DictConfig):
     t0 = time.time()
     activation = cfg.ACTIVATION_FUNCTIONS.split(", ")
     activation_fixed = ["tanh"]
-    for af_critic in activation:
+    activation_list = cfg.ACTIVATION_LIST.split(", ")
+    for j, af_critic in enumerate(activation_list):
         IQM_values_list = []
-        for af_policy in activation:
-            cfg.ACTIVATION = af_policy
-            cfg.CRITIC_ACTIVATION = af_critic
-            print("Policy: ", af_policy, "Critic: ", af_critic)
-            train_vvjit = jax.jit(jax.vmap(make_train(cfg)))
-            outs = train_vvjit(rngs)
-            outs = outs["metrics"]["returned_episode_returns"]
-            print(f"time: {time.time() - t0:.2f} s")
-            average_values = moving_avg(outs)
-            num_steps = average_values.shape[1]
-            IQM_values = np.array([metrics.aggregate_iqm(average_values[:, t])
-                                   for t in range(num_steps)])
-            IQM_values_list.append(IQM_values)
-            print(f"time: {time.time() - t0:.2f} s")
+        # for af_policy in activation:
+        #     cfg.ACTIVATION = af_policy
+        #     cfg.CRITIC_ACTIVATION = af_critic
+        #     af_layer = activation_list
+        #     af_layer[j] = af_policy
+        #     cfg.ACTIVATION_LIST = ", ".join(af_layer)
+        #     #print("Policy: ", af_policy, "Critic: ", af_critic)
+        #     print("Layer: ", j+1, "AF: ", af_policy)
+        #     train_vvjit = jax.jit(jax.vmap(make_train(cfg)))
+        #     outs = train_vvjit(rngs)
+        #     outs = outs["metrics"]["returned_episode_returns"]
+        #     print(f"time: {time.time() - t0:.2f} s")
+        #     average_values = moving_avg(outs)
+        #     num_steps = average_values.shape[1]
+        #     IQM_values = np.array([metrics.aggregate_iqm(average_values[:, t])
+        #                            for t in range(num_steps)])
+        #     IQM_values_list.append(IQM_values)
+        #     print(f"time: {time.time() - t0:.2f} s")
 
         # wandb.config = OmegaConf.to_container(
         #     cfg, resolve=True, throw_on_missing=True)
@@ -366,9 +387,9 @@ def main(cfg: DictConfig):
         #        {af + " IQM": IQM_values[step], af + " Mean": mean_returns[step]}, step=step)
         # wandb.finish()
 
-        np.save("{env}_IQM_critic_{af}".format(
-            env=cfg.ENV_NAME, af=af_critic), IQM_values_list)
-        #IQM_values_list = np.load("AF_Gelu_allTimesteps/IQM_criticgelu.npy")
+        #np.save("{env}_Layer{count}_{af}".format(
+        #    env=cfg.ENV_NAME, af=af_policy, count=j+1), IQM_values_list)
+        IQM_values_list = np.load("CartPole-v1_Layer{}_tanh.npy".format(j+1))
         num_steps = 250000
         plt.figure(figsize=(10, 6))
         for i, af_policy in enumerate(activation):
@@ -376,15 +397,14 @@ def main(cfg: DictConfig):
             lower_bound = IQM_values_list[i][:num_steps] - std_IQM
             upper_bound = IQM_values_list[i][:num_steps] + std_IQM
             plt.plot(range(num_steps),
-                     IQM_values_list[i][:num_steps], label=f"{af_policy} policy")
+                     IQM_values_list[i][:num_steps], label="Layer{count}, AF:{af}".format(count=j+1, af=af_policy))
             plt.fill_between(range(num_steps),
                              lower_bound, upper_bound, alpha=0.2)
         plt.xlabel("Number of Steps")
         plt.ylabel("Returns")
-        plt.title("IQM returns for same activation function".format(af_critic))
+        plt.title("IQM returns for separate AF in a Layer".format(af_critic))
         plt.legend()
-        plt.savefig("{env}_IQM_critic_{af}_totalsteps.png".format(
-            env=cfg.ENV_NAME, af=af_critic))
+        plt.savefig("{env}_Layer{count}_{af}".format(env=cfg.ENV_NAME, af=af_policy, count=j+1))
 
 
 if __name__ == "__main__":

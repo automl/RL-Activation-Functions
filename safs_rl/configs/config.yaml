@@ -13,9 +13,10 @@ CLIP_EPS: 0.2
 VF_COEF: 0.5
 MAX_GRAD_NORM: 0.5
 ACTIVATION: tanh
-CRITIC_ACTIVATION: relu6
+CRITIC_ACTIVATION: tanh
 ENV_NAME: CartPole-v1
 ANNEAL_LR: True
 SPARSITY: 0
 NORMALIZED_WEIGHTS: 0
 ACTIVATION_FUNCTIONS: relu6, elu, gelu, swish, hardswish, softplus, tanh
+ACTIVATION_LIST: tanh, tanh, tanh, tanh

@@ -1,2 +1,6 @@
 outputs
 wandb
+safs_rl.egg-info
+__pycache__
+*.png
+*.npy

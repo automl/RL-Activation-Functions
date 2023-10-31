@@ -24,6 +24,7 @@ conda activate /bigwork/user/miniconda3/envs/myenv
 # Run RL environment
 python safs_rl/environemnt.py
 ```
+#Change LAYER and ENT_COEF to specify what to plot, as well as --config-name for the config
 
 # Example of SLURM script
 ```bash
@@ -47,6 +48,6 @@ module load cuDNN/8.2.2.26-CUDA-11.4.1
 conda activate /bigwork/nhwppetw/miniconda3/envs/safs-rl
 
 # Run GPU application
-python safs_rl/braxenv.py
+python safs_rl/braxenv.py --config-name config_halfcheetah ++ENT_COEF=0 ++LAYER=True
 ```
 

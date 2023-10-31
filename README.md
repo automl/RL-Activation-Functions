@@ -24,7 +24,7 @@ conda activate /bigwork/user/miniconda3/envs/myenv
 # Run RL environment
 python safs_rl/environemnt.py
 ```
-#Change LAYER and ENT_COEF to specify what to plot, as well as --config-name for the config
+#Change LAYER and ENT_COEF to specify what to train, as well as --config-name for the config
 
 # Example of SLURM script
 ```bash

@@ -1,8 +1,8 @@
-import jax
-import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
 import optax
+import jax
+import jax.numpy as jnp
 from flax.linen.initializers import constant, orthogonal
 from typing import Sequence, NamedTuple, Any
 from flax.training.train_state import TrainState
@@ -19,14 +19,13 @@ import functools
 from rliable import library as rly
 from rliable import metrics
 from rliable import plot_utils
-import braxwrapper as braxwrap
 
 
 class ActorCritic(nn.Module):
     action_dim: Sequence[int]
-    activation_af: str = "tanh"
-    critic_af: str = "tanh"
-    activation_list: str = "tanh, tanh"
+    activation_af: str = "elu"
+    critic_af: str = "elu"
+    activation_list: str = "elu, elu"
 
     def set_activation(self, new_activation):
         if (isinstance(new_activation, str)):
@@ -61,7 +60,6 @@ class ActorCritic(nn.Module):
         if len(activation_list) > 2:
             af_policy_1 = activation_fucntion(activation_list[0])
             af_policy_2 = activation_fucntion(activation_list[1])
-            # af_policy_3 = activation_fucntion(activation_list[2])
             af_critic_1 = activation_fucntion(activation_list[2])
             af_critic_2 = activation_fucntion(activation_list[3])
         else:
@@ -69,32 +67,25 @@ class ActorCritic(nn.Module):
             af_policy_2 = af_policy_1
             af_critic_1 = activation_fucntion(self.critic_af)
             af_critic_2 = af_critic_1
-
         actor_mean = nn.Dense(
-            256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(x)
         actor_mean = af_policy_1(actor_mean)
         actor_mean = nn.Dense(
-            256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(actor_mean)
         actor_mean = af_policy_2(actor_mean)
-        # actor_mean = nn.Dense(
-        #     256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        # )(actor_mean)
-        # actor_mean = af_policy_3(actor_mean)
         actor_mean = nn.Dense(
             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
         )(actor_mean)
-        actor_logtstd = self.param(
-            "log_std", nn.initializers.zeros, (self.action_dim,))
-        pi = distrax.MultivariateNormalDiag(actor_mean, jnp.exp(actor_logtstd))
+        pi = distrax.Categorical(logits=actor_mean)
 
         critic = nn.Dense(
-            256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(x)
         critic = af_critic_1(critic)
         critic = nn.Dense(
-            256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(critic)
         critic = af_critic_2(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
@@ -118,14 +109,9 @@ def make_train(cfg):
     cfg.NUM_UPDATES = cfg.TOTAL_TIMESTEPS // cfg.NUM_STEPS // cfg.NUM_ENVS
     cfg.MINIBATCH_SIZE = cfg.NUM_ENVS * cfg.NUM_STEPS // cfg.NUM_MINIBATCHES
 
-    env, env_params = braxwrap.BraxGymnaxWrapper(
-        cfg.ENV_NAME), None
+    env, env_params = gymnax.make(cfg.ENV_NAME)
+    env = FlattenObservationWrapper(env)
     env = LogWrapper(env)
-    env = braxwrap.ClipAction(env)
-    env = braxwrap.VecEnv(env)
-    if (cfg.NORMALIZE_ENV):
-        env = braxwrap.NormalizeVecObservation(env)
-        env = braxwrap.NormalizeVecReward(env, cfg.GAMMA)
 
     def linear_schedule(count):
         frac = 1.0 - (count // (cfg.NUM_MINIBATCHES
@@ -134,14 +120,15 @@ def make_train(cfg):
 
     def train(rng):
         # INIT NETWORK
-
+        # ent_coef = jnp.array([0.01, 0.005, 0.001])
+        ent_coef = cfg.ENT_COEF
         if cfg.LAYER == True:
-            print(cfg.ACTIVATION_LIST)
             network = ActorCritic(env.action_space(
-                env_params).shape[0], activation_list=cfg.ACTIVATION_LIST)
+                env_params).n, activation_list=cfg.ACTIVATION_LIST)
         else:
             network = ActorCritic(env.action_space(
-                env_params).shape[0], activation_af=cfg.ACTIVATION, critic_af=cfg.CRITIC_ACTIVATION)
+                env_params).n, activation_af=cfg.ACTIVATION, critic_af=cfg.CRITIC_ACTIVATION)
+
         rng, _rng = jax.random.split(rng)
         init_x = jnp.zeros(env.observation_space(env_params).shape)
         # Network pruning
@@ -170,14 +157,14 @@ def make_train(cfg):
         # INIT ENV
         rng, _rng = jax.random.split(rng)
         reset_rng = jax.random.split(_rng, cfg.NUM_ENVS)
-        obsv, env_state = env.reset(reset_rng, env_params)
+        obsv, env_state = jax.vmap(
+            env.reset, in_axes=(0, None))(reset_rng, env_params)
 
         # TRAIN LOOP
         def _update_step(runner_state, unused):
             # COLLECT TRAJECTORIES
             def _env_step(runner_state, unused):
                 train_state, env_state, last_obs, rng = runner_state
-
                 # SELECT ACTION
                 rng, _rng = jax.random.split(rng)
                 pi, value = network.apply(train_state.params, last_obs)
@@ -187,8 +174,9 @@ def make_train(cfg):
                 # STEP ENV
                 rng, _rng = jax.random.split(rng)
                 rng_step = jax.random.split(_rng, cfg.NUM_ENVS)
-                obsv, env_state, reward, done, info = env.step(
-                    rng_step, env_state, action, env_params)
+                obsv, env_state, reward, done, info = jax.vmap(env.step, in_axes=(0, 0, 0, None))(
+                    rng_step, env_state, action, env_params
+                )
                 transition = Transition(
                     done, action, value, reward, log_prob, last_obs, info
                 )
@@ -198,7 +186,7 @@ def make_train(cfg):
             runner_state, traj_batch = jax.lax.scan(
                 _env_step, runner_state, None, cfg.NUM_STEPS
             )
-
+            # metric = traj_batch
             # CALCULATE ADVANTAGE
             train_state, env_state, last_obs, rng = runner_state
             _, last_val = network.apply(train_state.params, last_obs)
@@ -215,7 +203,8 @@ def make_train(cfg):
                         next_value * (1 - done) - value
                     gae = (
                         delta
-                        + cfg.GAMMA * cfg.GAE_LAMBDA * (1 - done) * gae
+                        + cfg.GAMMA *
+                        cfg.GAE_LAMBDA * (1 - done) * gae
                     )
                     return (gae, value), gae
 
@@ -271,7 +260,7 @@ def make_train(cfg):
                         total_loss = (
                             loss_actor
                             + cfg.VF_COEF * value_loss
-                            - cfg.ENT_COEF * entropy
+                            - ent_coef * entropy  # check ent_coef
                         )
                         return total_loss, (value_loss, loss_actor, entropy)
 
@@ -323,19 +312,21 @@ def make_train(cfg):
         runner_state, metric = jax.lax.scan(
             _update_step, runner_state, None, cfg.NUM_UPDATES
         )
+        # network.set_activation("elu")
+        # train_state = TrainState.replace(
+        #    train_state, apply_fn=network.apply, params=runner_state[0].params)
+        # runner_state = (train_state, runner_state[1],
+        #                runner_state[2], runner_state[3])
+        # runner_state, metric = jax.lax.scan(
+        #    _update_step, runner_state, None, cfg.NUM_UPDATES
+        # )
         return {"runner_state": runner_state, "metrics": metric}
-
     return train
-
-
-num_seeds = 5
-rng = jax.random.PRNGKey(30)
-rngs = jax.random.split(rng, num_seeds)
-window_size = 100
 
 
 def moving_avg(arr):
     num_seeds, num_updates, num_steps, num_envs = arr.shape
+    window_size = 100
     if num_envs <= 2:
         moving_average = np.zeros((num_seeds, num_updates - window_size + 1))
     else:
@@ -353,9 +344,13 @@ def moving_avg(arr):
     return moving_average
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="config_humanoid")
+num_seeds = 10
+rng = jax.random.PRNGKey(42)
+rngs = jax.random.split(rng, num_seeds)
+
+
+@hydra.main(version_base=None, config_path="configs", config_name="config_fourrooms")
 def main(cfg: DictConfig):
-    t0 = time.time()
     label = ""
     path = "{env}_Plots/".format(env=cfg.ENV_NAME)
     if (cfg.LAYER == True):
@@ -370,29 +365,38 @@ def main(cfg: DictConfig):
         for af_policy in activation:
             cfg.ACTIVATION = af_policy
             cfg.CRITIC_ACTIVATION = af_critic
-            if (cfg.LAYER == True):
+            if (cfg.LAYER == True and cfg.ENT_COEF != 0):
                 af_layer = activation_list
                 af_layer[j] = af_policy
                 cfg.ACTIVATION_LIST = ", ".join(af_layer)
-                label = "Layer: {count}, AF:{af}".format(
-                    count=j+1, af=af_policy)
-                print("Layer: ", j+1, "AF: ", af_policy)
-
+                label = "{env}_entCoef_Critic_{critic}_Layer{num}".format(env=cfg.ENV_NAME,
+                                                                          policy=af_policy, critic=af_critic, num=j+1)
+            elif (cfg.LAYER == True and cfg.ENT_COEF == 0):
+                af_layer = activation_list
+                af_layer[j] = af_policy
+                cfg.ACTIVATION_LIST = ", ".join(af_layer)
+                label = "{env}_Critic_{critic}_Layer{num}".format(env=cfg.ENV_NAME,
+                                                                  policy=af_policy, critic=af_critic, num=j+1)
+            elif (cfg.ENT_COEF != 0 and cfg.LAYER == False):
+                label = "{env}_entCoef_Critic_{critic}".format(env=cfg.ENV_NAME,
+                                                               policy=af_policy, critic=af_critic)
             else:
-                label = "Policy:{policy}".format(
-                    policy=af_policy)
+                label = "{env}_Critic_{critic}.npy".format(env=cfg.ENV_NAME,
+                                                           policy=af_policy, critic=af_critic)
             train_vvjit = jax.jit(jax.vmap(make_train(cfg)))
             outs = train_vvjit(rngs)
+            # Save for state visitation
+            # outs = outs["metrics"][5]
+            # Save for returns
             outs = outs["metrics"]["returned_episode_returns"]
-            outs = moving_avg(outs)
-            print(f"time: {time.time() - t0:.2f} s")
-            # average_values = moving_avg(outs)
-            # num_steps = average_values.shape[1]
-            # IQM_values = np.array([metrics.aggregate_iqm(average_values[:, t])
-            #                       for t in range(num_steps)])
-            # IQM_values_list.append(IQM_values)
-            IQM_values_list.append(outs)
-            print(f"time: {time.time() - t0:.2f} s")
+            average_values = moving_avg(outs)
+            num_steps = average_values.shape[1]
+            std = np.std(average_values, axis=0)
+            IQM_values = np.array([metrics.aggregate_iqm(average_values[:, t])
+                                   for t in range(num_steps)])
+            IQM_values_list.append(IQM_values)
+
+        np.save(path+"numpy/"+label, IQM_values_list)
 
         # wandb.config = OmegaConf.to_container(
         #     cfg, resolve=True, throw_on_missing=True)
@@ -403,40 +407,6 @@ def main(cfg: DictConfig):
         # wandb.finish()
 
         # IQM_values_list = np.load("Hopper_policy/hopper_IQM_policy_{af}.npy".format(af = af_critic))
-        # num_steps = num_steps
-        # plt.figure(figsize=(10, 6))
-        # for i, af_policy in enumerate(activation):
-        #     std_IQM = np.std(IQM_values_list[i])
-        #     lower_bound = IQM_values_list[i][:num_steps] - std_IQM
-        #     upper_bound = IQM_values_list[i][:num_steps] + std_IQM
-        #     label = "Policy: {policy}".format(policy=af_policy)
-        #     plt.plot(range(num_steps),
-        #              IQM_values_list[i][:num_steps], label=label)
-        #     plt.fill_between(range(num_steps),
-        #                      lower_bound, upper_bound, alpha=0.2)
-
-        if (cfg.LAYER == True and cfg.ENT_COEF != 0):
-            label = "{env}_entCoef_Critic_{af}_Layer{num}.npy".format(env=cfg.ENV_NAME,
-                                                                      policy=af_policy, af=af_critic, num=j+1)
-        elif (cfg.LAYER == True):
-            label = "{env}_Critic_{af}_Layer{num}.npy".format(env=cfg.ENV_NAME,
-                                                               policy=af_policy, af=af_critic, num=j+1)
-        elif (cfg.ENT_COEF != 0):
-            label = "{env}_entCoef_Critic_{af}".format(
-                env=cfg.ENV_NAME, af=af_critic)
-        else:
-            label = "{env}_Critic_{af}".format(env=cfg.ENV_NAME, af=af_critic)
-        if (len(activation_list) > 4):
-            label = "{env}_Policy3_Layer{num}.npy".format(env=cfg.ENV_NAME,
-                                                          policy=af_policy, af=af_critic, num=j+1)
-
-        np.save(path + "numpy/" + label, IQM_values_list)
-
-        # plt.xlabel("Number of Steps")
-        # plt.ylabel("Returns")
-        # plt.title(title)
-        # plt.legend()
-        # plt.savefig(path + file_name)
 
 
 if __name__ == "__main__":

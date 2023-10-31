@@ -1,8 +1,8 @@
-import jax
-import jax.numpy as jnp
 import flax.linen as nn
 import numpy as np
 import optax
+import jax
+import jax.numpy as jnp
 from flax.linen.initializers import constant, orthogonal
 from typing import Sequence, NamedTuple, Any
 from flax.training.train_state import TrainState
@@ -20,13 +20,15 @@ from rliable import library as rly
 from rliable import metrics
 from rliable import plot_utils
 
+
 class ActorCritic(nn.Module):
     action_dim: Sequence[int]
     activation_af: str = "elu"
     critic_af: str = "elu"
     activation_list: str = "elu"
+
     def set_activation(self, new_activation):
-        if(isinstance(new_activation, str)):
+        if (isinstance(new_activation, str)):
             self.activation = new_activation
             self.critic = new_activation
         else:
@@ -65,7 +67,8 @@ class ActorCritic(nn.Module):
             af_policy_2 = af_policy_1
             af_critic_1 = activation_fucntion(self.critic_af)
             af_critic_2 = af_critic_1
-        print("policy 1:", activation_list[0], " policy 2:", activation_list[1], " critic 1:", activation_list[2], " critic 2:", activation_list[3])
+        print("policy 1:", activation_list[0], " policy 2:", activation_list[1],
+              " critic 1:", activation_list[2], " critic 2:", activation_list[3])
         actor_mean = nn.Dense(
             64, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
         )(x)
@@ -107,7 +110,7 @@ class Transition(NamedTuple):
 def make_train(cfg):
     cfg.NUM_UPDATES = cfg.TOTAL_TIMESTEPS // cfg.NUM_STEPS // cfg.NUM_ENVS
     cfg.MINIBATCH_SIZE = cfg.NUM_ENVS * cfg.NUM_STEPS // cfg.NUM_MINIBATCHES
-    
+
     env, env_params = gymnax.make(cfg.ENV_NAME)
     env = FlattenObservationWrapper(env)
     env = LogWrapper(env)
@@ -121,8 +124,7 @@ def make_train(cfg):
         # INIT NETWORK
         # ent_coef = jnp.array([0.01, 0.005, 0.001])
         ent_coef = cfg.ENT_COEF
-        activation_length = cfg.ACTIVATION_LIST.split(", ")
-        if len(activation_length) == 4:
+        if cfg.LAYERS == True:
             network = ActorCritic(env.action_space(
                 env_params).n, activation_list=cfg.ACTIVATION_LIST)
         else:
@@ -352,59 +354,59 @@ def moving_avg(arr):
     return moving_average
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="config")
+@hydra.main(version_base=None, config_path="configs", config_name="config_cartpole")
 def main(cfg: DictConfig):
     t0 = time.time()
+    label = ""
+    path = "{env}_Plots/".format(env=cfg.ENV_NAME)
+    if (cfg.LAYER == True):
+        activation_list = cfg.ACTIVATION_LIST.split(", ")
+    else:
+        activation_list = cfg.ACTIVATION_FUNCTIONS.split(", ")
     activation = cfg.ACTIVATION_FUNCTIONS.split(", ")
-    activation_fixed = ["tanh"]
-    activation_list = cfg.ACTIVATION_LIST.split(", ")
+    # activation_list = ["tanh"]
+    # activation = ["tanh"]
     for j, af_critic in enumerate(activation_list):
         IQM_values_list = []
-        # for af_policy in activation:
-        #     cfg.ACTIVATION = af_policy
-        #     cfg.CRITIC_ACTIVATION = af_critic
-        #     af_layer = activation_list
-        #     af_layer[j] = af_policy
-        #     cfg.ACTIVATION_LIST = ", ".join(af_layer)
-        #     #print("Policy: ", af_policy, "Critic: ", af_critic)
-        #     print("Layer: ", j+1, "AF: ", af_policy)
-        #     train_vvjit = jax.jit(jax.vmap(make_train(cfg)))
-        #     outs = train_vvjit(rngs)
-        #     outs = outs["metrics"]["returned_episode_returns"]
-        #     print(f"time: {time.time() - t0:.2f} s")
-        #     average_values = moving_avg(outs)
-        #     num_steps = average_values.shape[1]
-        #     IQM_values = np.array([metrics.aggregate_iqm(average_values[:, t])
-        #                            for t in range(num_steps)])
-        #     IQM_values_list.append(IQM_values)
-        #     print(f"time: {time.time() - t0:.2f} s")
+        for af_policy in activation:
+            cfg.ACTIVATION = af_policy
+            cfg.CRITIC_ACTIVATION = af_critic
+            if (cfg.LAYER == True):
+                af_layer = activation_list
+                af_layer[j] = af_policy
+                cfg.ACTIVATION_LIST = ", ".join(af_layer)
+                label = "Layer: {count}, AF:{af}".format(
+                    count=j+1, af=af_policy)
+                print("Layer: ", j+1, "AF: ", af_policy)
 
-        # wandb.config = OmegaConf.to_container(
-        #     cfg, resolve=True, throw_on_missing=True)
-        # wandb.init(project="SAFS-RL", name=af)
-        # for step in range(num_steps):
-        #    wandb.log(
-        #        {af + " IQM": IQM_values[step], af + " Mean": mean_returns[step]}, step=step)
-        # wandb.finish()
+            else:
+                label = "Policy:{policy}".format(
+                    policy=af_policy)
+            train_vvjit = jax.jit(jax.vmap(make_train(cfg)))
+            outs = train_vvjit(rngs)
+            outs = outs["metrics"]["returned_episode_returns"]
+            outs = moving_avg(outs)
+            print(f"time: {time.time() - t0:.2f} s")
+            # average_values = moving_avg(outs)
+            # num_steps = average_values.shape[1]
+            # IQM_values = np.array([metrics.aggregate_iqm(average_values[:, t])
+            #                       for t in range(num_steps)])
+            # IQM_values_list.append(IQM_values)
+            IQM_values_list.append(outs)
+            print(f"time: {time.time() - t0:.2f} s")
 
-        #np.save("{env}_Layer{count}_{af}".format(
-        #    env=cfg.ENV_NAME, af=af_policy, count=j+1), IQM_values_list)
-        IQM_values_list = np.load("CartPole-v1_Layer{}_tanh.npy".format(j+1))
-        num_steps = 250000
-        plt.figure(figsize=(10, 6))
-        for i, af_policy in enumerate(activation):
-            std_IQM = np.std(IQM_values_list[i])
-            lower_bound = IQM_values_list[i][:num_steps] - std_IQM
-            upper_bound = IQM_values_list[i][:num_steps] + std_IQM
-            plt.plot(range(num_steps),
-                     IQM_values_list[i][:num_steps], label="Layer{count}, AF:{af}".format(count=j+1, af=af_policy))
-            plt.fill_between(range(num_steps),
-                             lower_bound, upper_bound, alpha=0.2)
-        plt.xlabel("Number of Steps")
-        plt.ylabel("Returns")
-        plt.title("IQM returns for separate AF in a Layer".format(af_critic))
-        plt.legend()
-        plt.savefig("{env}_Layer{count}_{af}".format(env=cfg.ENV_NAME, af=af_policy, count=j+1))
+        if (cfg.LAYER == True and cfg.ENT_COEF != 0):
+            label = "{env}_entCoef_Critic_{af}_Layer{num}.npy".format(env=cfg.ENV_NAME,
+                                                                      policy=af_policy, af=af_critic, num=j+1)
+        elif (cfg.LAYER == True):
+            label = "{env}_Critic_{af}_Layer{num}.npy".format(env=cfg.ENV_NAME,
+                                                              policy=af_policy, af=af_critic, num=j+1)
+        elif (cfg.ENT_COEF != 0):
+            label = "{env}_entCoef_Critic_{af}".format(
+                env=cfg.ENV_NAME, af=af_critic)
+        else:
+            label = "{env}_Critic_{af}".format(env=cfg.ENV_NAME, af=af_critic)
+        np.save(path + "numpy/" + label, IQM_values_list)
 
 
 if __name__ == "__main__":

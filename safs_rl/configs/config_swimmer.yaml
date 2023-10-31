@@ -13,8 +13,8 @@ CLIP_EPS: 0.2
 VF_COEF: 0.5
 MAX_GRAD_NORM: 0.5
 ACTIVATION: tanh
-CRITIC_ACTIVATION: relu6
-ENV_NAME: hopper
+CRITIC_ACTIVATION: tanh
+ENV_NAME: swimmer
 ANNEAL_LR: False
 SPARSITY: 0
 NORMALIZED_WEIGHTS: 0
@@ -22,3 +22,4 @@ NORMALIZE_ENV: True
 DEBUG: True
 ACTIVATION_FUNCTIONS: relu6, elu, gelu, swish, hardswish, softplus, tanh
 ACTIVATION_LIST: tanh, tanh, tanh, tanh
+LAYER: False

@@ -10,6 +10,7 @@ from gymnax.wrappers.purerl import GymnaxWrapper
 from brax import envs
 from brax.envs.wrappers.training import EpisodeWrapper, AutoResetWrapper
 
+
 class BraxGymnaxWrapper:
     def __init__(self, env_name, backend="positional"):
         env = envs.get_environment(env_name=env_name, backend=backend)
@@ -41,6 +42,7 @@ class BraxGymnaxWrapper:
             shape=(self._env.action_size,),
         )
 
+
 class ClipAction(GymnaxWrapper):
     def __init__(self, env, low=-1.0, high=1.0):
         super().__init__(env)
@@ -53,11 +55,13 @@ class ClipAction(GymnaxWrapper):
         action = jnp.clip(action, self.low, self.high)
         return self._env.step(key, state, action, params)
 
+
 class VecEnv(GymnaxWrapper):
     def __init__(self, env):
         super().__init__(env)
         self.reset = jax.vmap(self._env.reset, in_axes=(0, None))
         self.step = jax.vmap(self._env.step, in_axes=(0, 0, 0, None))
+
 
 @struct.dataclass
 class NormalizeVecObsEnvState:
@@ -65,6 +69,7 @@ class NormalizeVecObsEnvState:
     var: jnp.ndarray
     count: float
     env_state: environment.EnvState
+
 
 class NormalizeVecObservation(GymnaxWrapper):
     def __init__(self, env):
@@ -88,7 +93,8 @@ class NormalizeVecObservation(GymnaxWrapper):
         new_mean = state.mean + delta * batch_count / tot_count
         m_a = state.var * state.count
         m_b = batch_var * batch_count
-        M2 = m_a + m_b + jnp.square(delta) * state.count * batch_count / tot_count
+        M2 = m_a + m_b + jnp.square(delta) * \
+            state.count * batch_count / tot_count
         new_var = M2 / tot_count
         new_count = tot_count
 
@@ -102,7 +108,8 @@ class NormalizeVecObservation(GymnaxWrapper):
         return (obs - state.mean) / jnp.sqrt(state.var + 1e-8), state
 
     def step(self, key, state, action, params=None):
-        obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)
+        obs, env_state, reward, done, info = self._env.step(
+            key, state.env_state, action, params)
 
         batch_mean = jnp.mean(obs, axis=0)
         batch_var = jnp.var(obs, axis=0)
@@ -114,7 +121,8 @@ class NormalizeVecObservation(GymnaxWrapper):
         new_mean = state.mean + delta * batch_count / tot_count
         m_a = state.var * state.count
         m_b = batch_var * batch_count
-        M2 = m_a + m_b + jnp.square(delta) * state.count * batch_count / tot_count
+        M2 = m_a + m_b + jnp.square(delta) * \
+            state.count * batch_count / tot_count
         new_var = M2 / tot_count
         new_count = tot_count
 
@@ -135,6 +143,7 @@ class NormalizeVecRewEnvState:
     return_val: float
     env_state: environment.EnvState
 
+
 class NormalizeVecReward(GymnaxWrapper):
 
     def __init__(self, env, gamma):
@@ -154,9 +163,10 @@ class NormalizeVecReward(GymnaxWrapper):
         return obs, state
 
     def step(self, key, state, action, params=None):
-        obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)
+        obs, env_state, reward, done, info = self._env.step(
+            key, state.env_state, action, params)
         return_val = (state.return_val * self.gamma * (1 - done) + reward)
- 
+
         batch_mean = jnp.mean(return_val, axis=0)
         batch_var = jnp.var(return_val, axis=0)
         batch_count = obs.shape[0]
@@ -167,7 +177,8 @@ class NormalizeVecReward(GymnaxWrapper):
         new_mean = state.mean + delta * batch_count / tot_count
         m_a = state.var * state.count
         m_b = batch_var * batch_count
-        M2 = m_a + m_b + jnp.square(delta) * state.count * batch_count / tot_count
+        M2 = m_a + m_b + jnp.square(delta) * \
+            state.count * batch_count / tot_count
         new_var = M2 / tot_count
         new_count = tot_count
 

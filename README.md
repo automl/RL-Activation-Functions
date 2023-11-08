@@ -3,7 +3,7 @@ Install Anaconda or Miiniconda from https://docs.conda.io/projects/conda/en/late
 Then follow the steps:
 =======
 ```bash
-git clone https://github.com/automl/SAFS-RL.git
+git clone https://github.com/automl/RL-Activation-Functions.git
 cd /SAFS-RL
 conda create --name myenv python=3.8.2
 conda activate myenv
